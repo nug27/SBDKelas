@@ -1,6 +1,42 @@
-const mongoose = require('mongoose');  // Add this import
+const mongoose = require('mongoose');
 const Transaction = require('../model/Transaction');
-const Account = require('../model/Account'); // Add this import
+const Account = require('../model/Account');
+const Category = require('../model/Category'); // Add this import
+
+// Update the updateCategoryBalances function
+async function updateCategoryBalances(transaction, session, reverseAmount = false) {
+  if (!transaction.tags || transaction.tags.length === 0) return;
+  
+  const multiplier = reverseAmount ? -1 : 1;
+  const amount = transaction.nominal * multiplier;
+  
+  // Update each category associated with the tags
+  for (const tagName of transaction.tags) {
+    if (!tagName.trim()) continue;
+    
+    // Find or create the category
+    let category = await Category.findOne({
+      user_id: transaction.id_akun,
+      name: tagName,
+      type: transaction.tipe
+    }).session(session);
+    
+    if (category) {
+      // Update existing category
+      category.balance += amount;
+      await category.save({ session });
+    } else {
+      // Create new category
+      category = new Category({
+        user_id: transaction.id_akun,
+        name: tagName,
+        type: transaction.tipe,
+        balance: amount
+      });
+      await category.save({ session });
+    }
+  }
+}
 
 // Get all transactions
 exports.getAllTransactions = async (req, res) => {
@@ -37,7 +73,7 @@ exports.createTransaction = async (req, res) => {
       deskripsi: req.body.deskripsi,
       nominal: req.body.nominal,
       category: req.body.category || 'lainnya',
-      tags: req.body.tags,
+      tags: req.body.tags || [],
       created_at: req.body.created_at || new Date()
     });
 
@@ -64,6 +100,9 @@ exports.createTransaction = async (req, res) => {
       { balance: account.balance },
       { session }
     );
+
+    // Update category balances
+    await updateCategoryBalances(newTransaction, session);
 
     await session.commitTransaction();
     session.endSession();
@@ -105,6 +144,9 @@ exports.updateTransaction = async (req, res) => {
       account.balance += originalTransaction.nominal;
     }
 
+    // Revert category balances for the original transaction
+    await updateCategoryBalances(originalTransaction, session, true);
+
     // Update the transaction
     const updatedTransaction = await Transaction.findByIdAndUpdate(
       req.params.id,
@@ -128,6 +170,9 @@ exports.updateTransaction = async (req, res) => {
       { balance: account.balance },
       { session }
     );
+
+    // Update category balances for the new transaction data
+    await updateCategoryBalances(updatedTransaction, session);
 
     await session.commitTransaction();
     session.endSession();
@@ -167,6 +212,9 @@ exports.deleteTransaction = async (req, res) => {
     } else if (transaction.tipe === 'expense') {
       account.balance += transaction.nominal;
     }
+
+    // Update category balances (reverse the effect)
+    await updateCategoryBalances(transaction, session, true);
 
     // Delete the transaction
     await Transaction.findByIdAndDelete(req.params.id, { session });
